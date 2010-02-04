@@ -1,0 +1,330 @@
+#!/bin/bash
+#
+# This is a small shell script to handle virtual domain accounts
+# (c) 2005 by Mirko Friedenhagen mirko-AT-friedenhagen.de
+# You have to create a virtual user called "vmail" before using it.
+#
+PATH=/usr/lib/courier/sbin:/sbin:/usr/sbin:/usr/lib/courier/bin:/bin:/usr/bin
+POP_USER="vmail"
+COURIERDIR="/etc/courier"
+AUTHDIR="/etc/authlib"
+# computed Variables
+USERDBDIR="$AUTHDIR/userdb"
+ACCEPTMAILFOR="$COURIERDIR/esmtpacceptmailfor.dir/popadmin-auto"
+HOSTEDDOMAINS="$COURIERDIR/hosteddomains/popadmin-auto"
+PERCENTRELAY="$COURIERDIR/esmtppercentrelay.dir/popadmin-auto"
+ACCEPTMAILFORLOC="$COURIERDIR/esmtpacceptmailfor.dir/popadmin-local"
+HOSTEDDOMAINSLOC="$COURIERDIR/hosteddomains/popadmin-local"
+PERCENTRELAYLOC="$COURIERDIR/esmtppercentrelay.dir/popadmin-local"
+ALIASES="$COURIERDIR/aliases/popadmin-local"
+POP_UID=$(id -u $POP_USER)
+POP_GID=$(id -g $POP_USER)
+POP_HOME=$(eval echo ~$POP_USER)/domains
+
+# Used executables, normally found in PATH
+editAliases="pop_edit $ALIASES"
+userDB="userdb"
+userDBPW="userdbpw -md5"
+makeUserDB="makeuserdb"
+maildirMake="maildirmake"
+makeAliases="makealiases"
+makeAcceptMailFor="makeacceptmailfor"
+makeHostedDomains="makehosteddomains"
+makePercentRelays="makepercentrelay"
+
+pop_edit()
+{
+    vim -c ':set noexpandtab' $*
+}
+
+pop_update_databases()
+{
+    $makeUserDB
+    $makeUserDB
+    $makeAliases
+    $makeAcceptMailFor
+    $makeHostedDomains
+    $makePercentRelays
+}
+
+pop_edit_locals()
+{
+    pop_edit $ACCEPTMAILFORLOC
+    pop_edit $PERCENTRELAYLOC
+    pop_edit $HOSTEDDOMAINSLOC
+    pop_update_databases
+}
+
+pop_update_percentrelays()
+{
+    cd $COURIERDIR
+    local i
+    while read i
+    do
+        printf "%s.percent\n" $i
+    done < $ACCEPTMAILFOR > $PERCENTRELAY
+
+    cat $PERCENTRELAY > $ACCEPTMAILFOR-percentrelay
+
+    while read i
+    do
+        printf "%s.percent\t%s\n" $i $i
+    done < $HOSTEDDOMAINS > $HOSTEDDOMAINS-percentrelay
+    $makePercentRelays
+}
+
+pop_update_smtp_domains()
+{
+
+    ls -1 $USERDBDIR/ > $ACCEPTMAILFOR
+    ls -1 $USERDBDIR/ > $HOSTEDDOMAINS
+    pop_update_percentrelays
+    $makeAcceptMailFor
+    $makeHostedDomains
+}
+
+pop_edit_aliases()
+{
+    $editAliases
+    $makeAliases
+}
+
+pop_alias_show()
+{
+    echo
+    echo "** Aliases for $1"
+    awk -F':' '$1~/'"$1"'/&&$1!~/^#/' $ALIASES
+}
+
+pop_usage()
+{
+    if [ "$command" != "" ]
+    then 
+        echo "Usage: $command ${option#pop} $@"
+    else
+        echo "Usage: $option $@"
+    fi
+    exit 1
+}
+
+pop_domain_exists()
+{
+    local domain="$1"
+    if [ ! -f $USERDBDIR/$domain ]
+    then
+        echo "Domain $domain does not exist"
+        exit 1
+    fi
+}
+
+pop_user_exists()
+{
+    local domain="$1"
+    local user="$2"
+    pop_domain_exists $domain
+    if ! grep -q "^${user}@${domain}" $USERDBDIR/$domain
+    then
+        echo "User ${user} does not exist in domain ${domain}"
+        exit 1
+    fi
+}
+
+pop_user_del()
+{
+    local domain="$1"
+    local user="$2"
+    local usermaildir="${POP_HOME}/${domain}/${user}"
+    pop_user_exists $domain $user
+    $userDB ${domain}/${user}@${domain} del
+    if [ -d $usermaildir ]
+    then
+        echo "Maildir ${usermaildir} exists. Should I delete it (type 'yes')?"
+        read answer
+        if [ "$answer" = "yes" ]
+        then 
+            su -l $POP_USER -c "rm -rf ${usermaildir}"
+        else
+            echo "Deletion of ${usermaildir} skipped"
+        fi
+    fi
+}
+
+pop_user_add()
+{
+    local domain="$1"
+    local user="$2"
+    local userhome="${POP_HOME}/${domain}/${user}"
+    local usermaildir="$userhome/Maildir"
+
+    pop_domain_exists $domain
+    if grep -q "^${user}@${domain}" $USERDBDIR/$domain
+    then
+        echo "User ${user} already exists in domain ${domain}"
+        exit 1
+    fi
+
+    if [ -d ${userhome} ]
+    then
+        echo "Maildir ${usermaildir} already exists."
+        exit 1
+    fi
+    mkdir $userhome
+    $maildirMake $usermaildir
+    chown -R $POP_UID $userhome
+    chgrp -R $POP_GID $userhome
+    chmod -R go= $userhome
+    $userDB ${domain}/${user}@${domain} set \
+        uid=$POP_UID \
+        gid=$POP_GID \
+        home=$userhome
+    pop_passwd $@
+    pop_user_show $domain $user
+}
+
+pop_user_show()
+{
+    local domain="$1"
+    local user="$2"
+    pop_user_exists $domain $user
+    echo "** Information for ${user}@${domain}"
+    $userDB -show ${domain}/${user}@${domain}
+    pop_alias_show "${user}@${domain}"
+}
+
+pop_domain_del()
+{
+    local domain="$1"
+    local domaindir="${POP_HOME}/${domain}"
+    local domainpwd="$USERDBDIR/$domain"
+
+    pop_domain_exists $domain
+    rm -f $domainpwd
+    if [ -d $domaindir ]
+    then
+        echo "Directory ${domaindir} exists. Should I delete it (type 'yes')?"
+        read answer
+        if [ "$answer" = "yes" ]
+        then 
+            su -l $POP_USER -c "rm -rf ${domaindir}"
+        else
+            echo "Deletion of ${domaindir} skipped"
+        fi
+    fi
+}
+
+pop_domain_add()
+{
+    local domain="$1"
+    local domaindir="${POP_HOME}/${domain}"
+    local domainpwd="$USERDBDIR/$domain"
+
+    if [ -f $domainpwd -o -d $domaindir ]
+    then
+        echo "Domain $domain or Domaindir $domaindir does exist"
+        exit 1
+    fi
+    su -l $POP_USER -c "mkdir -p $domaindir"
+    touch $domainpwd
+    chmod go= $domainpwd $domaindir
+}
+
+
+pop_passwd()
+{
+    local domain="$1"
+    local user="$2"
+    pop_user_exists $domain $user
+    echo "Please enter the new password for ${user}@${domain}"
+    $userDBPW | $userDB ${domain}/${user}@${domain} set systempw
+}
+
+command=`basename $0`
+
+if [ $command = "popadmin" ]
+then
+    option="${1}"
+    shift
+else
+    option=${command:3}
+    command=""
+fi
+
+case $option in
+    userpasswd|UP)
+        [ $# -ne 2 ] && pop_usage "domain user"
+        pop_passwd $@
+        $makeUserDB
+    ;;
+
+    domainadd|DA)
+        [ $# -ne 1 ] && pop_usage "domain"
+        pop_domain_add $@
+        $makeUserDB
+        pop_update_smtp_domains
+    ;;
+
+    domaindel|DD)
+        [ $# -ne 1 ] && pop_usage "domain"
+        pop_domain_del $@
+        $makeUserDB
+        pop_update_smtp_domains
+    ;;
+
+    domainshow|DS)
+        [ $# -ne 1 ] && pop_usage "domain"
+        pop_domain_exists $1
+        echo "** Users of $1"
+        awk '{print $1}' $USERDBDIR/$1
+        pop_alias_show $1
+    ;;
+
+    domainlist|DL)
+        echo "** Virtual Domains hosted on this server:"
+        ls -1 $USERDBDIR/
+        echo
+        echo "** Domains this server accepts mail for:"
+        grep -h -v '#' $ACCEPTMAILFOR*
+        echo
+        echo "** Percent-Relay Domains of this server:"
+        grep -h -v '#' $PERCENTRELAY*
+        echo
+        echo "** Rewrite-Rules:"
+        grep -h -v '#' $HOSTEDDOMAINS-*
+    ;;
+
+    useradd|UA)
+        [ $# -ne 2 ] && pop_usage "domain user"
+        pop_user_add $@
+        $makeUserDB
+    ;;
+
+    userdel|UD)
+        [ $# -ne 2 ] && pop_usage "domain user"
+        pop_user_del $@
+        $makeUserDB
+    ;;
+
+    usershow|US)
+        [ $# -ne 2 ] && pop_usage "domain user"
+        pop_user_show $@
+    ;;
+
+    aliases|AL)
+        pop_edit_aliases
+    ;;
+
+    updatedatabases|UPD)
+        pop_update_databases
+   ;;
+    EditLocals|EL)
+        pop_edit_locals
+    ;;
+    dump*)
+        cat $USERDBDIR/*
+    ;;
+
+    *)
+        echo "popadmin DomainList|DomainShow|DomainAdd|DomainDel|UserAdd|UserDel|UserShow|UserPasswd|ALiases|UPdateDatabases|EditLocals|dump"
+        echo "Either use complete command or UpperCase laters of commands"
+    ;;
+esac
