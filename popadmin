@@ -2,6 +2,7 @@
 #
 # This is a small shell script to handle virtual domain accounts
 # (c) 2005 by Mirko Friedenhagen mirko-AT-friedenhagen.de
+# This software is distributed under a BSD license.
 # You have to create a virtual user called "vmail" before using it.
 #
 PATH=/usr/lib/courier/sbin:/sbin:/usr/sbin:/usr/lib/courier/bin:/bin:/usr/bin
